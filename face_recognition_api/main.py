@@ -1,7 +1,8 @@
 import sys
 import os
 sys.path.append(os.path.abspath('..'))
-from fastapi import FastAPI, status, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, status, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from fastapi.params import Depends
 from .import models
@@ -34,6 +35,38 @@ def get_db():
         yield db
     finally:
         db.close()
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            await connection.send_json(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/logs")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # Keep connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.post("/notify")
+async def notify(request: Request):
+    data = await request.json()
+    await manager.broadcast(data)
+    return {"message": "Notification sent"}
 
 @app.get('/')
 def index():
