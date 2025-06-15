@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text
+from sqlalchemy import Column, Integer, String, Text, Boolean
 from .database import Base
 import json
 
@@ -6,10 +6,12 @@ import json
 class Person(Base):
     __tablename__ = 'people'
     id = Column(Integer, primary_key=True, index=True)
+    access = Column(Boolean, default=True)
     firstName = Column(String)
     lastName = Column(String)
     function = Column(String)
     email = Column(String)
+    photo_url = Column(String, nullable=True)  # Optional field for storing photo URL
     encoding = Column("encoding", Text)
 
     # @property
