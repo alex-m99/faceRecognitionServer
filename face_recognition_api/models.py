@@ -1,23 +1,40 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Table
+from sqlalchemy.orm import relationship
 from .database import Base
-import json
+import datetime
 
-# database model
+class System(Base):
+    __tablename__ = 'systems'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    password = Column(String, nullable=False)
+    address = Column(String, nullable=False)
+    started = Column(Boolean, default=True)
+    starting_date = Column(DateTime, default=datetime.datetime.utcnow)
+
+    # Relationship to PersonSystem
+    persons = relationship("PersonSystem", back_populates="system")
+
+class PersonSystem(Base):
+    __tablename__ = 'person_system'
+    person_id = Column(Integer, ForeignKey('people.id'), primary_key=True)
+    system_id = Column(Integer, ForeignKey('systems.id'), primary_key=True)
+    access = Column(Boolean, default=True)
+
+    # Relationships
+    person = relationship("Person", back_populates="systems")
+    system = relationship("System", back_populates="persons")
+
+# Update Person to add relationship
 class Person(Base):
     __tablename__ = 'people'
     id = Column(Integer, primary_key=True, index=True)
-    access = Column(Boolean, default=True)
     firstName = Column(String)
     lastName = Column(String)
     function = Column(String)
     email = Column(String)
-    photo_url = Column(String, nullable=True)  # Optional field for storing photo URL
+    photo_url = Column(String, nullable=True)
     encoding = Column("encoding", Text)
 
-    # @property
-    # def encoding(self) -> list[float]:
-    #     return json.loads(self._encoding)
-
-    # @encoding.setter
-    # def encoding(self, value: list[float]):
-    #     self._encoding = json.dumps(value)
+    # Relationship to PersonSystem
+    systems = relationship("PersonSystem", back_populates="person")

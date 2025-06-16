@@ -2,8 +2,7 @@ from pydantic import BaseModel
 from typing import List
 
 class DisplayPerson(BaseModel):
-    id: int
-    access: bool = True  
+    id: int  
     firstName: str
     lastName: str
     function: str
