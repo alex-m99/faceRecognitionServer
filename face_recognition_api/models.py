@@ -3,14 +3,23 @@ from sqlalchemy.orm import relationship
 from .database import Base
 import datetime
 
+class Admin(Base):
+    __tablename__ = "admins"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+
 class System(Base):
     __tablename__ = 'systems'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     password = Column(String, nullable=False)
+    lock_password = Column(String, nullable=False)
     address = Column(String, nullable=False)
     started = Column(Boolean, default=True)
     starting_date = Column(DateTime, default=datetime.datetime.utcnow)
+    system_token = Column(String, nullable=True)  # <-- Add this
+    
 
     # Relationship to PersonSystem
     persons = relationship("PersonSystem", back_populates="system")

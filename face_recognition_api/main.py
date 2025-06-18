@@ -1,7 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath('..'))
-from fastapi import FastAPI, status, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Body
+from fastapi import FastAPI, status, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Body, Header
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from fastapi.params import Depends
@@ -20,12 +20,23 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 from datetime import datetime
 from passlib.context import CryptContext
+from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from datetime import timedelta
+
+#CHANGE IT LATER!!!
+SECRET_KEY = "your-secret-key" 
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 
 app = FastAPI()
 # fd = FaceData()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,12 +54,45 @@ app.mount(
 
 models.Base.metadata.create_all(engine)
 
+def generate_system_token():
+    return uuid4().hex
+
+def hash_token(token: str) -> str:
+    return pwd_context.hash(token)
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_current_admin(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    admin = db.query(models.Admin).filter(models.Admin.username == username).first()
+    if admin is None:
+        raise credentials_exception
+    return admin
 
 
 def hash_password(password: str) -> str:
@@ -118,6 +162,15 @@ async def websocket_updates(websocket: WebSocket):
     except WebSocketDisconnect:
         updates_manager.disconnect(websocket)
 
+
+@app.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.username == form_data.username).first()
+    if not admin or not verify_password(form_data.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": admin.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/notify")
 async def notify(request: Request):
     data = await request.json()
@@ -128,14 +181,15 @@ async def notify(request: Request):
 def index():
     return 'Hello world!'
 
-@app.post('/person', status_code=status.HTTP_201_CREATED)
+@app.post('/person',  status_code=status.HTTP_201_CREATED)
 def add_person(
     firstName: str = Form(...), 
     lastName: str = Form(...), 
     function: str = Form(...),
     email: str = Form(...),
     photo: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     
     #save the uploaded photo
@@ -184,7 +238,8 @@ def update_person(
     function: str = Form(...),
     email: str = Form(...),
     photo: UploadFile = File(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     person = db.query(models.Person).filter(models.Person.id == id).first()
     if not person:
@@ -245,7 +300,8 @@ def update_person(
 @app.delete('/person/{id}', status_code=status.HTTP_204_NO_CONTENT)
 def delete_person(
     id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     person = db.query(models.Person).filter(models.Person.id == id).first()
     if not person:
@@ -266,7 +322,7 @@ def delete_person(
     return {"message": "Person deleted"}
 
 @app.get('/people', response_model=List[schemas.DisplayPerson])
-def get_people(db: Session = Depends(get_db)):
+def get_people(db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
     people = db.query(models.Person).all()
 
     # Parse the `encoding` JSON string into actual lists
@@ -278,8 +334,11 @@ def get_people(db: Session = Depends(get_db)):
     return results
 
     
-@app.get('/{system_id}/encodings', response_model=List[schemas.PersonWithEncoding])
-def get_people_with_encodings(system_id: int, db: Session = Depends(get_db)):
+@app.get('/{system_id}/encodings', response_model=List[schemas.PersonWithEncoding],)
+def get_people_with_encodings(
+    system_id: int, 
+    db: Session = Depends(get_db), 
+):
     people = (
         db.query(models.Person)
         .join(models.PersonSystem, models.Person.id == models.PersonSystem.person_id)
@@ -301,7 +360,7 @@ def get_people_with_encodings(system_id: int, db: Session = Depends(get_db)):
     return results
 
 @app.post("/recognition-login")
-def recognition_login(
+async def recognition_login(
     name: str = Body(...),
     password: str = Body(...),
     db: Session = Depends(get_db)
@@ -310,6 +369,8 @@ def recognition_login(
     if not system or not pwd_context.verify(password, system.password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     system.started = True
+    db.commit() 
+    await logs_manager.broadcast({ "event": "system_started" })
     return {"success": True, "system_id": system.id}
 
 
@@ -317,11 +378,11 @@ def recognition_login(
 
 
 @app.get("/systems")
-def get_systems(db: Session = Depends(get_db)):
+def get_systems(db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
     return db.query(models.System).all()
 
 @app.get("/systems/{system_id}/people")
-def get_people_for_system(system_id: int, db: Session = Depends(get_db)):
+def get_people_for_system(system_id: int, db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
     people = (
         db.query(models.Person)
         .join(models.PersonSystem, models.Person.id == models.PersonSystem.person_id)
@@ -331,13 +392,37 @@ def get_people_for_system(system_id: int, db: Session = Depends(get_db)):
     return people
 
 @app.post("/systems")
-def add_system(name: str = Form(...), password: str = Form(...), address: str = Form(...), db: Session = Depends(get_db)):
+def add_system(
+    name: str = Form(...),
+    password: str = Form(...),
+    lock_password: str = Form(...),
+    address: str = Form(...),
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
+):
     hashed_password = hash_password(password)
-    new_system = models.System(name=name, password = hashed_password, address=address, started = False, starting_date=datetime.utcnow())
+    hashed_lock_password = hash_password(lock_password)
+    plain_token = uuid4().hex
+    hashed_token = hash_token(plain_token)
+    new_system = models.System(
+        name=name,
+        password=hashed_password,
+        lock_password=hashed_lock_password,
+        address=address,
+        started=False,
+        starting_date=datetime.utcnow(),
+        system_token=hashed_token
+    )
     db.add(new_system)
     db.commit()
     db.refresh(new_system)
-    return {"id": new_system.id, "name": new_system.name, "address": new_system.address}
+    # Return the plain token only once!
+    return {
+        "id": new_system.id,
+        "name": new_system.name,
+        "address": new_system.address,
+        "system_token": plain_token
+    }
 
 
 @app.post("/systems/{system_id}/people", status_code=status.HTTP_201_CREATED)
@@ -345,7 +430,8 @@ def add_person_to_system(
     system_id: int,
     person_id: int = Body(...),
     access: bool = Body(True),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     person_system = models.PersonSystem(
         person_id=person_id,
@@ -359,29 +445,63 @@ def add_person_to_system(
     return {"person_id": person_id, "system_id": system_id, "access": access}
 
 @app.patch("/systems/{system_id}/start")
-def start_system(system_id: int, db: Session = Depends(get_db)):
+def start_system(
+    system_id: int,
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
+):
     system = db.query(models.System).get(system_id)
     if not system:
         raise HTTPException(status_code=404)
     system.started = True
+    plain_token = uuid4().hex
+    hashed_token = hash_token(plain_token)
+    system.system_token = hashed_token
     db.commit()
-    return {"success": True}
+    asyncio.run(updates_manager.broadcast(system_id, {"event": "system_started"}))
+    # Return the new plain token only once!
+    return {"success": True, "system_token": plain_token}
 
 @app.patch("/systems/{system_id}/stop")
-def stop_system(system_id: int, db: Session = Depends(get_db)):
+def stop_system(system_id: int, db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
     system = db.query(models.System).get(system_id)
     if not system:
         raise HTTPException(status_code=404)
     system.started = False
     db.commit()
+    asyncio.run(updates_manager.broadcast(system_id, {"event": "system_stopped"}))
     return {"success": True}
+
+@app.patch("/systems/{system_id}/logout")
+def logout_system(system_id: int, db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
+    system = db.query(models.System).get(system_id)
+    if not system:
+        raise HTTPException(status_code=404)
+    system.started = False
+    db.commit()
+    asyncio.run(updates_manager.broadcast(system_id, {"event": "system_logout"}))
+    return {"success": True}
+
+@app.get("/systems/{system_id}/system-token")
+def get_system_token(
+    system_id: int,
+    lock_token: str = Header(..., alias="X-Lock-Token"),
+    db: Session = Depends(get_db)
+):
+    system = db.query(models.System).get(system_id)
+    if not system:
+        raise HTTPException(status_code=404, detail="System not found")
+    if not system.lock_token or lock_token != system.lock_token:
+        raise HTTPException(status_code=403, detail="Invalid lock token")
+    return {"system_token": system.system_token}
 
 @app.patch("/systems/{system_id}/people/{person_id}/access")
 def set_person_access_in_system(
     system_id: int,
     person_id: int,
     access: bool = Body(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     person_system = db.query(models.PersonSystem).filter(
         models.PersonSystem.system_id == system_id,
@@ -400,8 +520,10 @@ def edit_system(
     system_id: int,
     name: str = Form(...),
     password: str = Form(None),
+    lock_password: str = Form(None),
     address: str = Form(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     system = db.query(models.System).get(system_id)
     if not system:
@@ -410,11 +532,13 @@ def edit_system(
     system.address = address
     if password:
         system.password = hash_password(password)
+    if lock_password:
+        system.lock_password = hash_password(lock_password)
     db.commit()
     return {"success": True}
 
 @app.delete("/systems/{system_id}")
-def delete_system(system_id: int, db: Session = Depends(get_db)):
+def delete_system(system_id: int, db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
     system = db.query(models.System).get(system_id)
     if not system:
         raise HTTPException(status_code=404)
@@ -431,7 +555,8 @@ def delete_system(system_id: int, db: Session = Depends(get_db)):
 def delete_person_from_system(
     system_id: int,
     id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: models.Admin = Depends(get_current_admin)
 ):
     person_system = db.query(models.PersonSystem).filter(
         models.PersonSystem.system_id == system_id,
@@ -443,3 +568,15 @@ def delete_person_from_system(
     db.commit()
     asyncio.run(updates_manager.broadcast(system_id, {"event": "update_encodings"}))
     return {"message": "Person removed from system"}
+
+
+
+@app.post("/create-admin")
+def create_admin(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
+    
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    hashed = pwd_context.hash(password)
+    admin = models.Admin(username=username, password_hash=hashed)
+    db.add(admin)
+    db.commit()
+    return {"username": username}
