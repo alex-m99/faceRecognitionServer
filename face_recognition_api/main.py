@@ -171,8 +171,22 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = create_access_token(data={"sub": admin.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/notify")
-async def notify(request: Request):
+@app.post("/notify/{system_id}")
+async def notify(
+    system_id: int,
+    request: Request,
+    authorization: str = Header(None, alias="Authorization"),
+    db: Session = Depends(get_db)
+):
+    system = db.query(models.System).get(system_id)
+    if not system:
+        raise HTTPException(status_code=404, detail="System not found")
+    # Check Authorization header against the system's system_token
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Invalid or missing Authorization token")
+    token = authorization.split(" ", 1)[1]
+    if token != system.system_token:
+        raise HTTPException(status_code=403, detail="Invalid Authorization token")
     data = await request.json()
     await logs_manager.broadcast(data)
     return {"message": "Notification sent"}
@@ -371,7 +385,7 @@ async def recognition_login(
     system.started = True
     db.commit() 
     await logs_manager.broadcast({ "event": "system_started" })
-    return {"success": True, "system_id": system.id}
+    return {"success": True, "system_id": system.id, "system_token": system.system_token, "lock_password": system.lock_password}
 
 
 ####################################################################
@@ -454,13 +468,13 @@ def start_system(
     if not system:
         raise HTTPException(status_code=404)
     system.started = True
-    plain_token = uuid4().hex
-    hashed_token = hash_token(plain_token)
-    system.system_token = hashed_token
+    # plain_token = uuid4().hex
+    # hashed_token = hash_token(plain_token)
+    # system.system_token = hashed_token
     db.commit()
     asyncio.run(updates_manager.broadcast(system_id, {"event": "system_started"}))
     # Return the new plain token only once!
-    return {"success": True, "system_token": plain_token}
+    return {"success": True}
 
 @app.patch("/systems/{system_id}/stop")
 def stop_system(system_id: int, db: Session = Depends(get_db), admin: models.Admin = Depends(get_current_admin)):
